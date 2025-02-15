@@ -6,6 +6,7 @@ use log::{error, info};
 use serde_json::json;
 use std::fs;
 use std::path::Path;
+use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC, percent_decode_str};
 
 const PHOTOS_PATH: &str = "Photos";
 
@@ -26,19 +27,22 @@ async fn get_galleries() -> impl Responder {
             if let Ok(entry) = entry {
                 if entry.path().is_dir() {
                     if let Some(name) = entry.file_name().to_str() {
+                        let encoded_name = utf8_percent_encode(name, NON_ALPHANUMERIC).to_string();
                         let mut images = Vec::new();
                         if let Ok(image_entries) = fs::read_dir(entry.path()) {
                             for image_entry in image_entries {
                                 if let Ok(image_entry) = image_entry {
                                     if image_entry.path().is_file() {
                                         if let Some(image_name) = image_entry.file_name().to_str() {
-                                            images.push(image_name.to_string());
+                                            if !image_name.ends_with(".db") {
+                                                images.push(image_name.to_string());
+                                            }
                                         }
                                     }
                                 }
                             }
                         }
-                        galleries.push(json!({ "name": name, "images": images }));
+                        galleries.push(json!({ "name": encoded_name, "images": images }));
                     }
                 }
             }
@@ -54,7 +58,8 @@ async fn get_galleries() -> impl Responder {
 /// Returns the actual image file.
 #[get("/galleries/{name}/{image}")]
 async fn get_image(path: web::Path<(String, String)>) -> impl Responder {
-    let (gallery_name, image_name) = path.into_inner();
+    let (encoded_gallery_name, image_name) = path.into_inner();
+    let gallery_name = percent_decode_str(&encoded_gallery_name).decode_utf8_lossy().to_string();
     let image_path = Path::new(PHOTOS_PATH).join(gallery_name).join(image_name);
 
     if image_path.exists() && image_path.is_file() {
@@ -72,7 +77,8 @@ async fn get_image(path: web::Path<(String, String)>) -> impl Responder {
 /// Returns the highlight (first image in folder) of the gallery.
 #[get("/galleries/{name}/highlight")]
 async fn get_highlight(path: web::Path<String>) -> impl Responder {
-    let gallery_name = path.into_inner();
+    let encoded_gallery_name = path.into_inner();
+    let gallery_name = percent_decode_str(&encoded_gallery_name).decode_utf8_lossy().to_string();
     let gallery_path = Path::new(PHOTOS_PATH).join(gallery_name);
 
     if gallery_path.exists() && gallery_path.is_dir() {

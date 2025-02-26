@@ -1,12 +1,14 @@
 #![windows_subsystem = "windows"]
 
-use actix_web::{get, web, HttpResponse, Responder, http::header};
 use actix_cors::Cors;
+use actix_web::{get, http::header, web, HttpResponse, Responder};
+use deadpool_postgres::Pool;
+use dotenv::dotenv;
 use log::{error, info};
 use serde_json::json;
 use std::fs;
 use std::path::Path;
-use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC, percent_decode_str};
+use website_pictures_server::db::{get_database, get_services};
 
 const PHOTOS_PATH: &str = "Photos";
 
@@ -27,7 +29,6 @@ async fn get_galleries() -> impl Responder {
             if let Ok(entry) = entry {
                 if entry.path().is_dir() {
                     if let Some(name) = entry.file_name().to_str() {
-                        let encoded_name = utf8_percent_encode(name, NON_ALPHANUMERIC).to_string();
                         let mut images = Vec::new();
                         if let Ok(image_entries) = fs::read_dir(entry.path()) {
                             for image_entry in image_entries {
@@ -42,7 +43,7 @@ async fn get_galleries() -> impl Responder {
                                 }
                             }
                         }
-                        galleries.push(json!({ "name": encoded_name, "images": images }));
+                        galleries.push(json!({ "name": name, "images": images }));
                     }
                 }
             }
@@ -58,8 +59,7 @@ async fn get_galleries() -> impl Responder {
 /// Returns the actual image file.
 #[get("/galleries/{name}/{image}")]
 async fn get_image(path: web::Path<(String, String)>) -> impl Responder {
-    let (encoded_gallery_name, image_name) = path.into_inner();
-    let gallery_name = percent_decode_str(&encoded_gallery_name).decode_utf8_lossy().to_string();
+    let (gallery_name, image_name) = path.into_inner();
     let image_path = Path::new(PHOTOS_PATH).join(gallery_name).join(image_name);
 
     if image_path.exists() && image_path.is_file() {
@@ -77,8 +77,7 @@ async fn get_image(path: web::Path<(String, String)>) -> impl Responder {
 /// Returns the highlight (first image in folder) of the gallery.
 #[get("/galleries/{name}/highlight")]
 async fn get_highlight(path: web::Path<String>) -> impl Responder {
-    let encoded_gallery_name = path.into_inner();
-    let gallery_name = percent_decode_str(&encoded_gallery_name).decode_utf8_lossy().to_string();
+    let gallery_name = path.into_inner();
     let gallery_path = Path::new(PHOTOS_PATH).join(gallery_name);
 
     if gallery_path.exists() && gallery_path.is_dir() {
@@ -110,20 +109,46 @@ async fn get_highlight(path: web::Path<String>) -> impl Responder {
     }
 }
 
+/// Returns a JSON list of all services.
+#[get("/services")]
+async fn get_services_endpoint(pool: web::Data<Pool>) -> impl Responder {
+    match get_services(&pool).await {
+        Ok(services) => HttpResponse::Ok().json(services),
+        Err(e) => {
+            error!("Failed to get services: {:?}", e);
+            HttpResponse::InternalServerError().body("Failed to get services")
+        }
+    }
+}
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
+    println!("Starting server..");
+    dotenv().ok();
+
+    ::std::env::set_var("RUST_LOG", "debug");
+    ::std::env::set_var("actix_web", "debug");
     env_logger::Builder::from_default_env()
         .filter(None, log::LevelFilter::Debug)
         .init();
-
-    info!("Starting server..");
 
     let photos_path = Path::new(PHOTOS_PATH);
     if !photos_path.exists() {
         panic!("Photos path does not exist: {}", PHOTOS_PATH);
     }
 
-    actix_web::HttpServer::new(|| {
+    let pool = match get_database().await {
+        Ok(pool) => pool,
+        Err(e) => {
+            error!("Failed to get database connection pool: {:?}", e);
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "Failed to get database connection pool",
+            ));
+        }
+    };
+
+    actix_web::HttpServer::new(move || {
         let cors = Cors::default()
             .allow_any_origin()
             .allowed_methods(vec!["GET", "POST"])
@@ -133,10 +158,12 @@ async fn main() -> std::io::Result<()> {
 
         actix_web::App::new()
             .wrap(cors)
+            .app_data(web::Data::new(pool.clone()))
             .service(index)
             .service(get_galleries)
             .service(get_highlight)
             .service(get_image)
+            .service(get_services_endpoint)
     })
     .bind("127.0.0.1:8080")?
     .run()

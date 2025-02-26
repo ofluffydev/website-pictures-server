@@ -8,6 +8,11 @@ pub struct Image {
     pub path: String,
 }
 
+pub mod models;
+pub mod db;
+pub mod config;
+pub mod errors;
+
 impl Gallery {
     pub fn new() -> Gallery {
         Gallery {
